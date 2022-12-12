@@ -212,10 +212,10 @@ session_start() {
     test -z "$name" && help && exit 1
 
     # good grief
-    running_session=$(run sessions-list | grep -B4 -A2 "Config name: ${name}")
+    running_session=$(run sessions-list | grep -B3 -A2 "Config name: ${name}")
 
     if [ -n "$running_session" ]; then
-      echo "session ${name} already running: ${running_session}" && return
+      echo -e "session ${name} already running:\n${running_session}" && return
     fi
 
     case $use in
