@@ -1,0 +1,383 @@
+#!/bin/bash
+
+OVPN=${OVPN_PATH:-$(which openvpn3)}
+LOG_COMMANDS="${LOG_COMMANDS:-}"
+
+run() {
+  if [ "$LOG_COMMANDS" = "true" ]; then
+    >&2 echo ">$OVPN $*"
+  fi
+
+  # shellcheck disable=SC2068
+  "$OVPN" $@
+}
+
+error() {
+  >&2 echo "ERROR: $*" 
+}
+
+help() {
+  echo "$0 [COMMAND]"
+  echo ""
+  echo "commands:"
+  echo "	session		session configuration"
+  echo "	config		client configuration"
+  echo "	help		show this message"
+  echo
+  echo "alternatively use '--' to pass arguments directly to $OVPN"
+}
+
+config_import() {
+  help() {
+    echo "usage: $(basename "$0") config import [OPTIONS] PATH"
+    echo ""
+    echo "options:"
+    echo "	-n | --name NAME	config name"
+    echo "	-e | --ephemeral	do not persist imported config"
+    echo "	-h | --help	show this message"
+  }
+
+  VALID_ARGS=$(getopt -o hen: --long help,ephemeral,name: -- "$@")
+  # shellcheck disable=SC2181
+  if [[ $? -ne 0 ]]; then
+      help && exit 1;
+  fi
+
+  ephemeral=
+  name=
+
+  eval set -- "$VALID_ARGS"
+  # shellcheck disable=SC2078
+  while [ : ]; do
+    case "$1" in
+      -e | --ephemeral)
+        ephemeral=true
+        shift
+        ;;
+      -n | --name)
+        name="$2"
+        shift 2
+        ;;
+      -h | --help) shift; 
+        help && exit 0
+        ;;
+      --) shift
+        break
+        ;;
+    esac
+  done
+
+  path="$1"
+
+  test -z "$path" && help && exit 1
+  test -f "$path" || { error "no such file $path" && echo && help && exit 1; }
+
+  if [ -n "$name" ]; then
+    run configs-list | grep "$USER" | grep -q "$name" && echo "config $name already exists" && exit 0
+  else
+    run configs-list | grep "$USER" | grep -q "$path" && echo "config $path already exists" && exit 0
+  fi
+
+  run config-import ${name:+--name "$name"} ${ephemeral:-"--persistent"} --config "$path"
+}
+
+config_remove() {
+  help() {
+    echo "usage: $(basename "$0") config remove [OPTIONS] NAME"
+    echo ""
+    echo "options:"
+    echo "	-f | --force	don't ask for confirmation"
+    echo "	-p | --use-path	use unique config path instead of name"
+    echo "	-h | --help	show this message"
+  }
+
+  VALID_ARGS=$(getopt -o hfp --long help,force,use-path -- "$@")
+  # shellcheck disable=SC2181
+  if [[ $? -ne 0 ]]; then
+      help && exit 1;
+  fi
+
+  force=
+  use_path=
+
+  eval set -- "$VALID_ARGS"
+  # shellcheck disable=SC2078
+  while [ : ]; do
+    case "$1" in
+      -f | --force)
+        force=true
+        shift
+        ;;
+      -p | --use-path)
+        use_path=true
+        shift
+        ;;
+      -h | --help) shift; 
+        help && exit 0
+        ;;
+      --) shift
+        break
+        ;;
+    esac
+  done
+
+  name="$1"
+
+  test -z "$name" && help && exit 1
+
+  if [ -z "$use_path" ]; then
+    run config-remove ${force:+"--force"} --config "$name"
+  else
+    run config-remove ${force:+"--force"} --path "$name"
+  fi
+}
+
+config() {
+  help() {
+    echo "usage: $(basename "$0") config COMMAND"
+    echo
+    echo "commands:"
+    echo "	list		list existing configurations"
+    echo "	import		import a config file"
+    echo "	help		show this message"
+  }
+
+  case $1 in
+    list) shift
+      run configs-list
+      ;;
+    import) shift
+      # shellcheck disable=SC2068
+      config_import $@
+      ;;
+    remove) shift
+      # shellcheck disable=SC2068
+      config_remove $@
+      ;;
+    help|--help)
+      help && exit 0
+      ;;
+    *)
+      help && exit 1
+      ;;
+  esac
+}
+
+session_start() {
+  help() {
+    echo "usage: $(basename "$0") session start [OPTIONS] NAME"
+    echo ""
+    echo "options:"
+    echo "	-p | --use-path	use unique config path instead of config name"
+    echo "	-h | --help	show this message"
+  }
+
+  VALID_ARGS=$(getopt -o hap --long help,all,use-path -- "$@")
+  # shellcheck disable=SC2181
+  if [[ $? -ne 0 ]]; then
+      help && exit 1;
+  fi
+
+  all=
+  use="config"
+
+  eval set -- "$VALID_ARGS"
+  # shellcheck disable=SC2078
+  while [ : ]; do
+    case "$1" in
+      -a | --all)
+        all=true
+        shift
+        ;;
+      -p | --use-path)
+        use="path"
+        shift
+        ;;
+      -h | --help) shift; 
+        help && exit 0
+        ;;
+      --) shift
+        break
+        ;;
+    esac
+  done
+
+  if [ "$all" = "true" ]; then
+    for config_paths in $(run configs-list | grep "/net/openvpn/"); do
+      run session-start --config-path "$config_paths"
+    done
+  else
+    name="$1"
+
+    test -z "$name" && help && exit 1
+
+    # good grief
+    running_session=$(run sessions-list | grep -B4 -A2 "Config name: ${name}")
+
+    if [ -n "$running_session" ]; then
+      echo "session ${name} already running: ${running_session}" && return
+    fi
+
+    case $use in
+      config) run session-start --config "$name" ;;
+      path) run session-start --config-path "$name" ;;
+      *) error "unknown error" && exit 1
+    esac
+  fi
+}
+
+session_stop() {
+  help() {
+    echo "usage: $(basename "$0") session stop [OPTIONS] NAME"
+    echo ""
+    echo "options:"
+    echo "	-a | --all	use unique session path instead of config name"
+    echo "	-p | --use-path	use unique session path instead of config name"
+    echo "	-i | --use-interface	use interface name instead of config name"
+    echo "	-h | --help	show this message"
+  }
+
+  VALID_ARGS=$(getopt -o hapi --long help,all,use-path,use-interface -- "$@")
+  # shellcheck disable=SC2181
+  if [[ $? -ne 0 ]]; then
+      help && exit 1;
+  fi
+
+  all=
+  use="config"
+
+  eval set -- "$VALID_ARGS"
+  # shellcheck disable=SC2078
+  while [ : ]; do
+    case "$1" in
+      -a | --all)
+        all=true
+        shift
+        ;;
+      -p | --use-path)
+        use="path"
+        shift
+        ;;
+      -i | --use-interface)
+        use="interface"
+        shift
+        ;;
+      -h | --help) shift; 
+        help && exit 0
+        ;;
+      --) shift
+        break
+        ;;
+    esac
+  done
+
+  if [ "$all" = "true" ]; then
+    for session_path in $(run sessions-list | grep "Path: " | awk '{ print $2 }'); do
+      run session-manage --disconnect --session-path "$session_path"
+    done
+  else
+    name="$1"
+
+    test -z "$name" && help && exit 1
+
+    # # good grief
+    # running_session=$(run sessions-list | grep -B4 -A2 "Config name: ${name}")
+    #
+    # if [ -n "$running_session" ]; then
+    #   echo "session ${name} already running: ${running_session}" && return
+    # fi
+    case $use in
+      config) run session-manage --disconnect --config "$name" ;;
+      path) run session-manage --disconnect --session-path "$name" ;;
+      interface) run session-manage --disconnect --interface "$name" ;;
+      *) error "unknown error" && exit 1 ;;
+    esac
+  fi
+
+  run session-manage --cleanup
+}
+
+session_auth() {
+  help() {
+    echo "usage: $(basename "$0") session auth COMMAND"
+    echo
+    echo "commands:"
+    echo "	list		list existing sessions authentication processes"
+    echo "	continue ID	continue an authentication process for the given auth request ID"
+    echo "	help		show this message"
+  }
+
+  case $1 in
+    list) shift
+      run session-auth
+      ;;
+    continue) shift
+      test -z "$1" && help && exit 1
+      run session-auth --auth-req "$1"
+      ;;
+    help|--help)
+      help && exit 0
+      ;;
+    *)
+      help && exit 1
+      ;;
+  esac
+}
+
+session() {
+  help() {
+    echo "usage: $(basename "$0") session COMMAND"
+    echo
+    echo "commands:"
+    echo "	list		list existing sessions"
+    echo "	start		start a session"
+    echo "	stop		stop a session"
+    echo "	auth		show on-going authentication requests"
+    echo "	help		show this message"
+  }
+
+  case $1 in
+    list) shift
+      run sessions-list
+      ;;
+    start) shift
+      # shellcheck disable=SC2068
+      session_start $@
+      ;;
+    stop) shift
+      # shellcheck disable=SC2068
+      session_stop $@
+      ;;
+    auth) shift
+      # shellcheck disable=SC2068
+      session_auth $@
+      ;;
+    help|--help)
+      help && exit 0
+      ;;
+    *)
+      help && exit 1
+      ;;
+  esac
+}
+
+case $1 in
+  config) shift
+    # shellcheck disable=SC2068
+    config $@
+    ;;
+  session) shift
+    # shellcheck disable=SC2068
+    session $@
+    ;;
+  help|--help)
+    help && exit 0
+    ;;
+  --) shift
+    # shellcheck disable=SC2068
+    run $@
+    ;;
+  *)
+    help && exit 1
+    ;;
+esac
